@@ -1,0 +1,343 @@
+
+
+##### Creating a map of the cape using the QDS grids###
+
+#1)get libraries
+#2) create objects 
+#3) plot all maps in two panels 
+
+#load libraries
+
+library(tidyverse)
+library(readxl)
+library(readr)
+library(sf)
+library(units)
+library(terra)
+library(mapview)
+library(viridis)
+library(tidyr)
+library(ggpubr)
+library(dplyr)
+library(corrplot)
+library(MuMIn)
+library(AICcmodavg)
+library(spdep)
+library(spatialreg)
+
+
+# Cleaning the data
+CFR_data <- readRDS("Data/CFR_data")
+CFR_data$Mean_Ext_P = log(CFR_data$Mean_Ext_P)
+
+#Z standardize the covariates  
+CFR_data_anlys <- CFR_data %>%
+  mutate(across(6:30, scale))
+
+
+
+##############################################################################
+###############################################################################
+##########################Facultative models 
+##############################################################################
+
+#Climatic stability submodel
+Clim.fct <- glm(Facultative_species ~  Median_CloudFQ + percent_wetland + Mean_CSI
+                , family = "quasipoisson" , data = CFR_data_anlys)
+#Model summary 
+summary(Clim.fct)
+
+#water and energy hypothesis submodel
+Prod.fct <- glm(Facultative_species~ Mean_annual_Temperature + mean_annual_Rainfall + 
+                  Mean_PET + Mean_Soil_ph + Mean_Ext_P, family = "quasipoisson" , data = CFR_data_anlys)
+#Model summary
+summary(Prod.fct)
+
+#Environmental heterogeneity Model
+Het.fct <- glm(Facultative_species ~
+                 Range_Temperature + Roughness_Dry_Rainfall + PET_Roughness
+               , family = "quasipoisson" , data = CFR_data_anlys)
+#Model summary
+summary(Het.fct)
+
+#full model
+full.fct <- glm(Facultative_species ~ Median_CloudFQ + percent_wetland + Mean_CSI+
+                  Mean_annual_Temperature + mean_annual_Rainfall + 
+                  Mean_PET + Mean_Soil_ph + Mean_Ext_P +
+                  Range_Temperature + Roughness_Dry_Rainfall + PET_Roughness
+                , family = "quasipoisson" , data = CFR_data_anlys)
+
+#Model summary
+summary(full.fct)
+
+
+
+# Now we plot the residuals:
+# ***************************************************************************
+# the following piece of code extracts log Likelihoods and AIC, and calculates
+# the other things needed for a AIC based model selection.
+# In the end, it produces a model selection table
+# ************************************************************************
+
+# Data
+# Narrow range spp 
+climate= summary(Clim.fct)$coefficients %>% data.frame()
+climate = climate[-1,]
+climate$Covariates = c('Median CloudFQ', 'Wetland%', 'Mean CSI')
+
+productivity= summary(Prod.fct)$coefficients %>% data.frame()
+productivity = productivity[-1,]
+productivity$Covariates = c('MAT', 'MAP', 'PET', 'pH', 'P')
+
+Heterogeneity = summary(Het.fct)$coefficients %>% data.frame()
+Heterogeneity = Heterogeneity[-1,]
+Heterogeneity$Covariates = c('Range in MAT', 'Roughness in MDQ','Roughness in PET')
+
+Full = summary(full.fct)$coefficients %>% data.frame()
+Full = Full[-1,]
+Full$Covariates = c('Median CloudFQ', 'Wetland%', 'Mean CSI',
+                    'MAT', 'MAP', 'PET', 'pH', 'P',
+                    'Range in MAT', 'Roughness in MDQ','Roughness in PET')
+
+FCTspp = rbind(climate,productivity,Heterogeneity,Full)
+
+FCTspp$Model_Type = c( 'Climate stability', 'Climate stability', 'Climate stability',
+                         'Productivity', 'Productivity', 'Productivity', 'Productivity','Productivity', 
+                         'Environmental heterogeneity','Environmental heterogeneity','Environmental heterogeneity', 
+                         'Full','Full','Full','Full','Full','Full','Full','Full','Full','Full','Full') 
+
+# Calculate upper and lower bounds for error bars
+#data$error_upper <- data$Estimates + sd_values
+#data$error_lower <- data$Estimates - sd_values
+
+#plot 
+# Filter out rows with zero estimates
+#non_zero_data <- reshaped_data %>%
+#filter(Estimates != 0)
+
+add_asterisks <- function(Pr...t..) {
+  if (Pr...t.. <= 0.001) {
+    return('***')
+  } else if (Pr...t.. <= 0.01) {
+    return('**')
+  } else if (Pr...t.. <= 0.05) {
+    return('*')
+  } else {
+    return('')
+  }
+}
+#Add a new column for asterisks
+FCTspp$asterisks <- sapply(FCTspp$Pr...t.., add_asterisks)
+
+
+# Set custom order for Model_Type
+custom_order <- c("Climate stability","Productivity", "Environmental heterogeneity", "Full")
+FCTspp$Model_Type <- factor(FCTspp$Model_Type, levels = custom_order)
+
+# plot 
+
+FCT_GLM = ggplot(FCTspp, aes(x = Model_Type, y = Estimate, fill = Covariates)) +
+  geom_bar(stat = "identity", position = position_dodge2(preserve = "single"), width = 1) +
+  geom_text(aes(label = asterisks, vjust = ifelse(FCTspp$Estimate >= 0, 1, -0.2)),
+            position = position_dodge2(width = 1, preserve = "single"),
+            size = 20, angle = 90) +
+  labs(title = 'Quasi GLM',
+       x = 'Model Type',
+       y = 'Estimates', show.legend = FALSE) +
+  theme(panel.background = element_rect(fill = "white"))+
+  theme(panel.background = element_rect(fill = "white"),
+        text = element_text(size = 50),
+        legend.key.height = unit(2, 'cm'), 
+        legend.key.width = unit(2, 'cm'),
+        axis.title = element_text(size = 50, face = "bold"),
+        plot.title = element_text(size = 50, face = "bold", hjust = 0.5))+
+  coord_flip()+
+  theme(legend.position = "none") # Remove the legend
+
+
+#ggsave("Output/Narrow Range model outputs.png", Narrow_range_endemics, width = 40, height = 18.7, units = "cm")
+
+#-------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
+#-------------------------------------------------------------------------------
+#--------------------------Spatial autocorrelation  ------------------------
+
+##############################################################################
+
+
+#1) plot narrow range endemic map 
+#2) Look at resisuals 
+#3) Creat queen's neigbours 
+#4) plot to check 
+#5) then create W matrix of weights for each area
+#6) Calculate Moran’s I
+#7) If significant add errorsarlm and listw = w-matrix, method = "eigen", 
+##    zero.policy = T or lagsarlm
+
+#plot narrow range endemics 
+
+#creating queen's neigbours 
+Neighbours <- poly2nb(CFR_data_anlys)
+
+#matrics of weights
+listed_w <- spdep :: nb2listw(Neighbours, zero.policy = TRUE)
+
+# Perform Moran's test
+MoranI_Total <- moran.test(CFR_data_anlys$Facultative_species, listed_w)
+
+print(MoranI_Total)
+
+#Contact a Lagrange Multiplier test, to test spatial dependence in linear models
+
+#CHECKING spatial autocorrelation (fOR EACH MODEL AND EACH RESPONSE) : 
+# 1) residuals 
+# 2) response 
+# 3) The adjusted residuals 
+# 4) The adjusted response 
+# 5) The adjusted residuals and response (SARMA) 
+
+# Fit Rao's score for the climatic stability - narrow range 
+Clim.lagrange.fct <- lm.RStests(Clim.fct, listed_w, 
+                                test=c("LMerr","RLMerr","LMlag","RLMlag","SARMA"))
+
+# Only adjusted error and response show SPAT COR. 
+summary(Clim.lagrange.fct)
+
+# Fit Rao's score for the productivity - narrow range 
+Prod.lagrange.fct <- lm.RStests(Prod.fct, listed_w, 
+                                test=c("LMerr","RLMerr","LMlag","RLMlag","SARMA"))
+
+# No SPAT COR on all models but SAMAR is more unlikely 
+summary(Prod.lagrange.fct)
+
+# Fit Rao's score for the Heterogeneity - narrow range 
+HET.lagrange.fct <- lm.RStests(Het.fct, listed_w, 
+                               test=c("LMerr","RLMerr","LMlag","RLMlag","SARMA"))
+
+# No SPAT COR on : SAMAR, SPLAG & SPERR
+summary(HET.lagrange.fct)
+
+# Fit Rao's score for the Full - narrow range 
+full.lagrange.fct <- lm.RStests(full.fct, listed_w, 
+                                test=c("LMerr","RLMerr","LMlag","RLMlag","SARMA"))
+
+# only SPAT COR on :resp
+summary(full.lagrange.fct)
+
+
+
+# now fit a Spatial simultaneous 
+# autoregressive model estimation by maximum likelihood :
+# where : ρ and λ are found by nlminb or optim() first, and 
+# β and other parameters by generalized least squares subsequently.
+
+# Climatic stability 
+fct_clim.sp <- sacsarlm(Clim.fct, data= CFR_data_anlys, listed_w, zero.policy=TRUE)
+# outputs
+summary(fct_clim.sp)
+
+# Productivity  
+fct_prod.sp <- sacsarlm(Prod.fct, data= CFR_data_anlys, listed_w, zero.policy=TRUE)
+
+# outputs
+summary(fct_prod.sp)
+
+# Heterogeneity 
+fct_het.sp <- sacsarlm(Het.fct, data= CFR_data_anlys, listed_w, zero.policy=TRUE)
+
+# outputs
+summary(fct_het.sp)
+
+# Full model 
+fct_full.sp <- sacsarlm(full.fct, data= CFR_data_anlys, listed_w, zero.policy=TRUE)
+
+# outputs
+summary(fct_full.sp)
+
+# Now we plot the residuals:
+# ***************************************************************************
+# the following piece of code extracts log Likelihoods and AIC, and calculates
+# the other things needed for a AIC based model selection.
+# In the end, it produces a model selection table
+# ************************************************************************
+
+# Data
+# Narrow range endemics 
+climate.spt= summary(fct_clim.sp)$Coef %>% data.frame()
+climate.spt = climate.spt[-1,]
+climate.spt$Covariates = c('Median CloudFQ', 'Wetland%', 'Mean CSI')
+
+productivity.spt= summary(fct_prod.sp)$Coef %>% data.frame()
+productivity.spt = productivity.spt[-1,]
+productivity.spt$Covariates = c('MAT', 'MAP', 'PET', 'pH', 'P')
+
+Heterogeneity.spt = summary(fct_het.sp)$Coef %>% data.frame()
+Heterogeneity.spt = Heterogeneity.spt[-1,]
+Heterogeneity.spt$Covariates = c('Range in MAT', 'Roughness in MDQ','Roughness in PET')
+
+Full.spt = summary(fct_full.sp)$Coef %>% data.frame()
+Full.spt = Full.spt[-1,]
+Full.spt$Covariates = c('Median CloudFQ', 'Wetland%', 'Mean CSI',
+                        'MAT', 'MAP', 'PET', 'pH', 'P',
+                        'Range in MAT', 'Roughness in MDQ','Roughness in PET')
+
+FCTspp.spt = rbind(climate.spt,productivity.spt,Heterogeneity.spt,Full.spt)
+
+FCTspp.spt$Model_Type = c( 'Climate stability', 'Climate stability', 'Climate stability',
+                             'Productivity', 'Productivity', 'Productivity', 'Productivity','Productivity', 
+                             'Environmental heterogeneity','Environmental heterogeneity','Environmental heterogeneity', 
+                             'Full','Full','Full','Full','Full','Full','Full','Full','Full','Full','Full') 
+
+add_asterisks <- function(Pr...z..) {
+  if (Pr...z.. <= 0.001) {
+    return('***')
+  } else if (Pr...z.. <= 0.01) {
+    return('**')
+  } else if (Pr...z.. <= 0.05) {
+    return('*')
+  } else {
+    return('')
+  }
+}
+#Add a new column for asterisks
+FCTspp.spt$asterisks <- sapply(FCTspp.spt$Pr...z.., add_asterisks)
+
+# Set custom order for Model_Type
+custom_order <- c("Climate stability","Productivity", "Environmental heterogeneity", "Full")
+FCTspp.spt$Model_Type <- factor(FCTspp.spt$Model_Type, levels = custom_order)
+
+
+# plot 
+
+FCT_SARMA = ggplot(FCTspp.spt, aes(x = Model_Type, y = Estimate, fill = Covariates)) +
+  geom_bar(stat = "identity", position = position_dodge2(preserve = "single"), width = 1) +
+  geom_text(aes(label = asterisks, vjust = ifelse(FCTspp.spt$Estimate >= 0, 1, -0.2)),
+            position = position_dodge2(width = 1, preserve = "single"),
+            size = 20, angle = 90) +
+  labs(title = 'Quasi GLM',
+       x = '',
+       y = 'Estimates', show.legend = FALSE) +
+  theme(panel.background = element_rect(fill = "white"),
+        text = element_text(size = 50),
+        legend.key.height = unit(2, 'cm'), 
+        legend.key.width = unit(2, 'cm'),
+        axis.title = element_text(size = 50, face = "bold"),
+        plot.title = element_text(size = 50, face = "bold", hjust = 0.5))+
+  coord_flip()
+
+
+#plot_labels_p2 <- c(" ", "")
+
+# Use ggarrange to arrange plots and add labels
+
+FCT_MODELS <- ggpubr::ggarrange(FCT_GLM, FCT_SARMA, label.x = 0.4, label.y = 0.9,  hjust = 0, nrow = 1)
+
+ggsave("Output/Facltative_model.png", FCT_MODELS, width = 120, height = 90, units = "cm")
+
+
+
+##############################################################################
+###############################################################################
+########################## Proceed to : 4.) Obligate modeling 
+
+
